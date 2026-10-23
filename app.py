@@ -150,6 +150,9 @@ LAST_ERROR = {"time": None, "video": None, "error": None}
 
 
 _sessions = {}  # stream url -> (YoutubeDL instance that produced it, expires)
+# YouTube links only start working a few seconds after they're issued (yt-dlp reports this
+# as "available_at" and its downloader waits for it). Fetching earlier gets 403.
+_available_at = {}  # stream url -> unix time
 
 
 def _ydl_opts():
@@ -161,48 +164,15 @@ def _ydl_opts():
     return opts
 
 
-class _GotLinks(Exception):
-    pass
-
-
-def _download_ready_links(ydl, info):
-    """Run yt-dlp's normal download path but stop right before the first byte, and take the
-    exact links/headers its downloader would use. Links taken straight from a lookup are
-    refused (403) by YouTube for many videos; yt-dlp finishes preparing them just before
-    downloading."""
-    wanted = len(info.get("requested_formats") or [info])
-    got = []
-
-    def capture(name, new_info, *args, **kwargs):
-        got.append({"url": new_info["url"], "http_headers": new_info.get("http_headers") or {}})
-        if len(got) >= wanted:
-            raise _GotLinks()
-        return True, True
-
-    ydl.dl = capture
-    ydl.params.update(overwrites=True, outtmpl={"default": f"/tmp/yt-live-tv/{time.time_ns()}.%(ext)s"})
-    try:
-        ydl.process_ie_result(info, download=True)
-    except Exception:
-        pass  # _GotLinks, possibly wrapped by yt-dlp's error handling
-    return got if len(got) == wanted else None
-
-
 def _resolve_info(video_id):
     """Ask YouTube for a video's stream info. Returns (info, ydl, error)."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     if yt_dlp:
         ydl = yt_dlp.YoutubeDL(_ydl_opts())
         try:
-            info = ydl.extract_info(url, download=False)
+            return ydl.extract_info(url, download=False), ydl, None
         except Exception as e:
             return None, None, str(e)[-500:]
-        links = _download_ready_links(ydl, info)
-        if links:
-            info = {**info, "requested_formats": links}
-        else:
-            log.info("could not get download-ready links for %s, using lookup links", video_id)
-        return info, ydl, None
     r = ytdlp("-f", FORMAT, "-j", *YTDLP_ARGS, url)
     if r.returncode == 0 and r.stdout.strip():
         return json.loads(r.stdout.splitlines()[0]), None, None
@@ -222,6 +192,8 @@ def resolve(video_id):
     for f in (info.get("requested_formats") or [info]) if info else []:
         if f.get("url"):
             urls.append((f["url"], f.get("http_headers") or info.get("http_headers") or {}))
+            if f.get("available_at"):
+                _available_at[f["url"]] = float(f["available_at"])
     if not urls:
         err = err or "no playable formats"
         log.warning("resolve %s failed: %s", video_id, err)
@@ -314,6 +286,7 @@ def prefetch_loop():
                 del _url_cache[vid]
             for u in [k for k, (_, exp) in _sessions.items() if exp < now]:
                 del _sessions[u]
+                _available_at.pop(u, None)
         for d in (_checked, BAD_VIDEOS):
             for vid in [k for k, exp in d.items() if exp < now]:
                 del d[vid]
@@ -367,9 +340,16 @@ def _open(entry, url, headers):
     return urlopen(Request(url, headers=headers), timeout=30)
 
 
+def wait_until_available(url):
+    wait = _available_at.get(url, 0) - time.time()
+    if wait > 0:
+        time.sleep(min(wait, 60))
+
+
 def fetch_range(entry, start, end):
     """Open a bounded byte range upstream. Falls back to YouTube's ?range= form."""
     url, headers = entry["url"], entry["headers"]
+    wait_until_available(url)
     try:
         return _open(entry, url, {**headers, "Range": f"bytes={start}-{end}"})
     except Exception as e:
