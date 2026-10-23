@@ -181,6 +181,25 @@ local_guide:
 - This relies on an unofficial listings feed. If Zap2it changes it, this part may stop
   working. Your YouTube channels and their guide keep working either way.
 
+## Limiting video length
+
+To only use videos under an hour, add this near the top of `config.yaml`:
+
+```yaml
+max_duration: 3600     # seconds; 1800 = 30 min, 0 = no limit
+```
+
+You can also set it on one channel only, which overrides the global value:
+
+```yaml
+  - number: 102
+    name: MrBeast
+    url: https://www.youtube.com/@MrBeast
+    max_duration: 1800
+```
+
+`min_duration` (default 60 seconds) works the same way and keeps out Shorts.
+
 ## URLs
 
 | URL | What it is |

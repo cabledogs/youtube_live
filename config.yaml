@@ -5,6 +5,9 @@ name: YouTube Live TV
 tuners: 4              # how many streams can play at once
 refresh_hours: 6       # how often to check channels for new uploads
 guide_hours: 48
+# Skip videos longer than this many seconds (3600 = 1 hour). Remove or 0 for no limit.
+# Can also be set per channel.
+max_duration: 3600
 # Default is 720p H.264 + AAC, which Plex plays without transcoding.
 format: "bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/b[height<=720]"
 # If YouTube starts asking you to "sign in to confirm you're not a bot",

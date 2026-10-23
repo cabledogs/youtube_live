@@ -6,6 +6,7 @@ a fixed, repeating schedule, pulled from YouTube on demand with yt-dlp and
 remuxed to MPEG-TS with ffmpeg.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -16,6 +17,8 @@ import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape
 
 import yaml
@@ -65,6 +68,8 @@ class Channel:
         self.shuffle = c.get("shuffle", True)
         self.max_videos = int(c.get("max_videos", 500))
         self.min_duration = int(c.get("min_duration", 60))  # skips Shorts that slip through
+        # Skip videos longer than this many seconds (e.g. 3600 = under an hour). 0 = no limit.
+        self.max_duration = int(c.get("max_duration", CFG.get("max_duration", 0)) or 0)
         self.videos = []  # list of dicts: id, title, duration, description
 
     def refresh(self):
@@ -77,6 +82,8 @@ class Channel:
             for e in json.loads(r.stdout).get("entries") or []:
                 dur = e.get("duration")
                 if not e.get("id") or not dur or dur < self.min_duration:
+                    continue
+                if self.max_duration and dur > self.max_duration:
                     continue
                 if e.get("live_status") in ("is_live", "is_upcoming"):
                     continue
@@ -203,6 +210,103 @@ def status():
     return out
 
 
+# --- Relay -------------------------------------------------------------------
+# googlevideo.com rejects (403) the single open-ended request ffmpeg makes for a
+# whole file; it only serves bounded ranges, like yt-dlp's own downloader uses.
+# So ffmpeg reads from this local relay, which supports seeking and fetches from
+# YouTube in chunks.
+
+RELAY_CHUNK = 10 * 1024 * 1024
+_relay = {}  # token -> {"url", "headers", "size", "expires"}
+_relay_lock = threading.Lock()
+
+
+def relay_url(url, headers):
+    token = hashlib.sha1(url.encode()).hexdigest()[:20]
+    m = re.search(r"[?&]clen=(\d+)", url)
+    with _relay_lock:
+        now = time.time()
+        for t in [t for t, e in _relay.items() if e["expires"] < now]:
+            del _relay[t]
+        _relay.setdefault(token, {"url": url, "headers": dict(headers),
+                                  "size": int(m.group(1)) if m else None,
+                                  "expires": now + 6 * 3600})
+    return f"http://127.0.0.1:{PORT}/relay/{token}"
+
+
+def fetch_range(entry, start, end):
+    """Open a bounded byte range upstream. Falls back to YouTube's ?range= form."""
+    url, headers = entry["url"], entry["headers"]
+    try:
+        return urlopen(Request(url, headers={**headers, "Range": f"bytes={start}-{end}"}), timeout=30)
+    except HTTPError as e:
+        if e.code not in (403, 416):
+            raise
+        log.info("relay: Range header refused (%s), trying range= parameter", e.code)
+    sep = "&" if "?" in url else "?"
+    return urlopen(Request(f"{url}{sep}range={start}-{end}", headers=headers), timeout=30)
+
+
+def relay_size(entry):
+    if entry["size"] is None:
+        with fetch_range(entry, 0, 0) as r:
+            cr = r.headers.get("Content-Range", "")
+            entry["size"] = int(cr.rsplit("/", 1)[1]) if "/" in cr else int(r.headers.get("Content-Length", 0))
+    return entry["size"]
+
+
+def serve_relay(handler, token):
+    with _relay_lock:
+        entry = _relay.get(token)
+    if not entry:
+        handler.send_error(404)
+        return
+    try:
+        size = relay_size(entry)
+    except Exception as e:
+        log.warning("relay: upstream refused: %s", e)
+        handler.send_error(502)
+        return
+    start, end = 0, size - 1
+    rng = handler.headers.get("Range")
+    if rng and (m := re.match(r"bytes=(\d*)-(\d*)", rng)):
+        if m.group(1):
+            start = int(m.group(1))
+        if m.group(2):
+            end = min(int(m.group(2)), size - 1)
+    if start >= size:
+        handler.send_response(416)
+        handler.send_header("Content-Range", f"bytes */{size}")
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
+        return
+    handler.send_response(206 if rng else 200)
+    handler.send_header("Content-Type", "application/octet-stream")
+    handler.send_header("Accept-Ranges", "bytes")
+    handler.send_header("Content-Length", str(end - start + 1))
+    if rng:
+        handler.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+    handler.end_headers()
+    if handler.command == "HEAD":
+        return
+    pos = start
+    try:
+        while pos <= end:
+            stop = min(pos + RELAY_CHUNK - 1, end)
+            before = pos
+            with fetch_range(entry, pos, stop) as r:
+                while pos <= stop and (data := r.read(min(65536, stop - pos + 1))):
+                    handler.wfile.write(data)
+                    pos += len(data)
+            if pos == before:
+                raise IOError("upstream returned no data")
+    except (BrokenPipeError, ConnectionResetError):
+        pass  # ffmpeg closed or seeked elsewhere
+    except Exception as e:
+        log.warning("relay: upstream error at byte %d: %s", pos, e)
+        handler.close_connection = True
+
+
 def stream_channel(ch, out):
     videos = ch.videos
     if not videos:
@@ -223,15 +327,9 @@ def stream_channel(ch, out):
         log.info("[%s] playing %s (%s) from %.0fs", ch.name, v["title"], v["id"], offset)
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-re"]
         for u, headers in urls:
-            cmd += ["-ss", f"{offset:.2f}"]
             if u.startswith("http"):
-                cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
-                headers = dict(headers)
-                if ua := headers.pop("User-Agent", None):
-                    cmd += ["-user_agent", ua]
-                if headers:
-                    cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
-            cmd += ["-i", u]
+                u = relay_url(u, headers)
+            cmd += ["-ss", f"{offset:.2f}", "-i", u]
         if len(urls) > 1:
             cmd += ["-map", "0:v:0", "-map", "1:a:0"]
         else:
@@ -338,6 +436,8 @@ class Handler(BaseHTTPRequestHandler):
 <UDN>uuid:{DEVICE_ID}</UDN></device></root>""", "application/xml")
         elif path in ("/xmltv.xml", "/guide.xml"):
             self.send(build_xmltv(), "text/xml; charset=utf-8")
+        elif path.startswith("/relay/"):
+            serve_relay(self, path[len("/relay/"):])
         elif path == "/status":
             self.send(json.dumps(status(), indent=2))
         elif path == "/local.xml" and LOCAL:
