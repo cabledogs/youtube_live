@@ -1,5 +1,5 @@
 # Address Plex uses to reach this server. Use the LAN IP, not localhost.
-base_url: http://192.168.1.50:5004
+base_url: http://192.168.0.50:5004
 port: 5004
 name: YouTube Live TV
 tuners: 4              # how many streams can play at once
@@ -12,22 +12,21 @@ format: "bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/b[height<=720]"
 # cookies: /config/cookies.txt
 
 channels:
-  - number: 101
-    name: Veritasium
-    url: https://www.youtube.com/@veritasium
+  - number: 75
+    name: MrBeast
+    url: https://www.youtube.com/@MrBeast
     shuffle: true
-    max_videos: 300
 
-  - number: 102
-    name: Tasting History
-    url: https://www.youtube.com/@TastingHistory
+  - number: 76
+    name: Moriah Elizabeth
+    url: https://www.youtube.com/@MoriahElizabeth
     shuffle: true
 
   # One TV channel built from several YouTube channels or playlists:
-  - number: 103
+  - number: 77
     name: Science Mix
     urls:
       - https://www.youtube.com/@smartereveryday
       - https://www.youtube.com/@MarkRober
-      - https://www.youtube.com/playlist?list=PLxxxxxxxxxxxxxxxx
+      - https://www.youtube.com/@JerryRigEverything
     shuffle: true
