@@ -138,6 +138,14 @@ image is rebuilt with the new code. Otherwise run this in the terminal:
      port. Check the port mapping and any VLAN or custom network settings.
   5. In the DVR setup, the XMLTV link is on the guide step, under the country/postal code
      fields: "Have an XMLTV guide on your server? Click here to use that instead."
+- **"Could not tune channel" in Plex:** open `http://YOUR-IP:5004/status` and check the
+  container logs. If you see `403 Forbidden` from `googlevideo.com`, YouTube is rejecting
+  the stream. Update to the latest code and restart, which also updates yt-dlp. If it continues,
+  try a different YouTube client by adding this to `config.yaml`:
+  ```yaml
+  ytdlp_args: ["--extractor-args", "youtube:player_client=web_safari"]
+  ```
+  (other values to try: `tv`, `mweb`, `web_embedded`), and/or add a `cookies.txt`.
 - **Channels show no videos:** check the logs. "Sign in to confirm you're not a bot"
   means you need a `cookies.txt`. Put it in `/mnt/user/appdata/youtube_live/`,
   uncomment the `cookies.txt` line in `/mnt/user/appdata/youtube_live/docker-compose.yml`, set `cookies: /config/cookies.txt` in
@@ -181,6 +189,7 @@ local_guide:
 | `/xmltv.xml` | Program guide |
 | `/local.xml` | Local TV listings only (if `local_guide` is set) |
 | `/playlist.m3u` | Playlist for VLC, TiviMate and other IPTV apps |
+| `/status` | What each channel is playing now, and the last YouTube error |
 | `/stream/<number>` | The live stream of one channel |
 
 ## Notes

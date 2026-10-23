@@ -35,6 +35,9 @@ FORMAT = CFG.get("format", "bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/b[height<
 REFRESH_HOURS = float(CFG.get("refresh_hours", 6))
 TUNERS = int(CFG.get("tuners", 4))
 COOKIES = CFG.get("cookies")
+# Extra yt-dlp options used when getting video links, e.g.
+# ["--extractor-args", "youtube:player_client=web_safari"]
+YTDLP_ARGS = [str(a) for a in CFG.get("ytdlp_args", [])]
 GUIDE_HOURS = int(CFG.get("guide_hours", 48))
 # Fixed reference point so the schedule is the same across restarts.
 ANCHOR = 1_700_000_000
@@ -128,13 +131,76 @@ def refresh_loop():
         time.sleep(REFRESH_HOURS * 3600)
 
 
+_url_cache = {}  # video_id -> (expires_ts, urls)
+_url_lock = threading.Lock()
+LAST_ERROR = {"time": None, "video": None, "error": None}
+
+
 def resolve(video_id):
-    """Get direct media URL(s) for a video. These expire after a few hours, so resolve right before playing."""
-    r = ytdlp("-f", FORMAT, "-g", f"https://www.youtube.com/watch?v={video_id}")
-    if r.returncode != 0:
-        log.warning("resolve %s failed: %s", video_id, r.stderr.strip()[-300:])
+    """Get direct media URL(s) for a video, cached until shortly before YouTube expires them."""
+    with _url_lock:
+        hit = _url_cache.get(video_id)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    r = ytdlp("-f", FORMAT, "-j", *YTDLP_ARGS, f"https://www.youtube.com/watch?v={video_id}")
+    urls = []
+    if r.returncode == 0 and r.stdout.strip():
+        info = json.loads(r.stdout.splitlines()[0])
+        # Each stream: (url, headers). googlevideo answers 403 unless we send the same
+        # headers (User-Agent etc.) yt-dlp used when it got the link.
+        for f in info.get("requested_formats") or [info]:
+            if f.get("url"):
+                urls.append((f["url"], f.get("http_headers") or info.get("http_headers") or {}))
+    if not urls:
+        err = r.stderr.strip()[-500:]
+        log.warning("resolve %s failed: %s", video_id, err)
+        LAST_ERROR.update(time=time.strftime("%Y-%m-%d %H:%M:%S"), video=video_id, error=err)
         return []
-    return [u for u in r.stdout.splitlines() if u.strip()]
+    m = re.search(r"[?&/]expire[=/](\d+)", urls[0][0])
+    expires = min(int(m.group(1)) - 900, time.time() + 4 * 3600) if m else time.time() + 3600
+    with _url_lock:
+        _url_cache[video_id] = (expires, urls)
+    return urls
+
+
+def prefetch_loop():
+    """Keep links for what's airing now and next ready, so tuning starts in a second or two
+    instead of waiting on YouTube (Plex gives up with "Could not tune channel" otherwise)."""
+    while True:
+        for ch in CHANNELS.values():
+            videos = ch.videos
+            if not videos:
+                continue
+            i, offset, _ = Channel.locate(videos, time.time())
+            upcoming = [videos[i]]
+            if videos[i]["duration"] - offset < 900:  # less than 15 min left: get the next one too
+                upcoming.append(videos[(i + 1) % len(videos)])
+            for v in upcoming:
+                try:
+                    resolve(v["id"])
+                except Exception:
+                    log.exception("[%s] prefetch failed", ch.name)
+        with _url_lock:
+            now = time.time()
+            for vid in [k for k, (exp, _) in _url_cache.items() if exp < now]:
+                del _url_cache[vid]
+        time.sleep(120)
+
+
+def status():
+    out = {"last_youtube_error": LAST_ERROR, "channels": []}
+    for ch in CHANNELS.values():
+        videos = ch.videos
+        entry = {"number": ch.number, "name": ch.name, "videos": len(videos)}
+        if videos:
+            i, offset, _ = Channel.locate(videos, time.time())
+            with _url_lock:
+                ready = videos[i]["id"] in _url_cache
+            entry.update(now_playing=videos[i]["title"], video_id=videos[i]["id"],
+                         position=f"{int(offset // 60)}m of {int(videos[i]['duration'] // 60)}m",
+                         link_ready=ready)
+        out["channels"].append(entry)
+    return out
 
 
 def stream_channel(ch, out):
@@ -156,10 +222,15 @@ def stream_channel(ch, out):
             continue
         log.info("[%s] playing %s (%s) from %.0fs", ch.name, v["title"], v["id"], offset)
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-re"]
-        for u in urls:
+        for u, headers in urls:
             cmd += ["-ss", f"{offset:.2f}"]
             if u.startswith("http"):
                 cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
+                headers = dict(headers)
+                if ua := headers.pop("User-Agent", None):
+                    cmd += ["-user_agent", ua]
+                if headers:
+                    cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
             cmd += ["-i", u]
         if len(urls) > 1:
             cmd += ["-map", "0:v:0", "-map", "1:a:0"]
@@ -267,6 +338,8 @@ class Handler(BaseHTTPRequestHandler):
 <UDN>uuid:{DEVICE_ID}</UDN></device></root>""", "application/xml")
         elif path in ("/xmltv.xml", "/guide.xml"):
             self.send(build_xmltv(), "text/xml; charset=utf-8")
+        elif path == "/status":
+            self.send(json.dumps(status(), indent=2))
         elif path == "/local.xml" and LOCAL:
             self.send(build_local_xmltv(), "text/xml; charset=utf-8")
         elif path in ("/playlist.m3u", "/channels.m3u"):
@@ -276,7 +349,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send("\n".join(lines) + "\n", "audio/x-mpegurl")
         elif m := re.fullmatch(r"/(?:stream|auto/v)/?(\w+)", path):
             ch = CHANNELS.get(m.group(1))
+            log.info("tune request %s %s from %s", self.command, self.path, self.client_address[0])
             if not ch or not ch.videos:
+                log.warning("cannot tune %s: %s", m.group(1), "unknown channel" if not ch else "no videos loaded yet")
                 self.send_error(404 if not ch else 503)
                 return
             self.send_response(200)
@@ -291,6 +366,7 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 log.info("[%s] viewer disconnected", ch.name)
         else:
+            log.info("404 for %s %s from %s", self.command, self.path, self.client_address[0])
             self.send_error(404)
 
     do_HEAD = do_GET
@@ -301,6 +377,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=refresh_loop, daemon=True).start()
+    threading.Thread(target=prefetch_loop, daemon=True).start()
     if LOCAL:
         LOCAL.start()
     log.info("listening on :%d (base url %s)", PORT, BASE_URL)
