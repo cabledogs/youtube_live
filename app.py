@@ -161,15 +161,48 @@ def _ydl_opts():
     return opts
 
 
+class _GotLinks(Exception):
+    pass
+
+
+def _download_ready_links(ydl, info):
+    """Run yt-dlp's normal download path but stop right before the first byte, and take the
+    exact links/headers its downloader would use. Links taken straight from a lookup are
+    refused (403) by YouTube for many videos; yt-dlp finishes preparing them just before
+    downloading."""
+    wanted = len(info.get("requested_formats") or [info])
+    got = []
+
+    def capture(name, new_info, *args, **kwargs):
+        got.append({"url": new_info["url"], "http_headers": new_info.get("http_headers") or {}})
+        if len(got) >= wanted:
+            raise _GotLinks()
+        return True, True
+
+    ydl.dl = capture
+    ydl.params.update(overwrites=True, outtmpl={"default": f"/tmp/yt-live-tv/{time.time_ns()}.%(ext)s"})
+    try:
+        ydl.process_ie_result(info, download=True)
+    except Exception:
+        pass  # _GotLinks, possibly wrapped by yt-dlp's error handling
+    return got if len(got) == wanted else None
+
+
 def _resolve_info(video_id):
     """Ask YouTube for a video's stream info. Returns (info, ydl, error)."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     if yt_dlp:
         ydl = yt_dlp.YoutubeDL(_ydl_opts())
         try:
-            return ydl.extract_info(url, download=False), ydl, None
+            info = ydl.extract_info(url, download=False)
         except Exception as e:
             return None, None, str(e)[-500:]
+        links = _download_ready_links(ydl, info)
+        if links:
+            info = {**info, "requested_formats": links}
+        else:
+            log.info("could not get download-ready links for %s, using lookup links", video_id)
+        return info, ydl, None
     r = ytdlp("-f", FORMAT, "-j", *YTDLP_ARGS, url)
     if r.returncode == 0 and r.stdout.strip():
         return json.loads(r.stdout.splitlines()[0]), None, None

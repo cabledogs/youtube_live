@@ -73,6 +73,33 @@ try:
 except Exception as e:
     print(f"C: full yt-dlp download: FAIL ({str(e)[:150]})")
 
+print("\n=== D. Take links from yt-dlp's download path (the new fix), then fetch 1 KB ourselves ===")
+try:
+    ydl = yt_dlp.YoutubeDL(opts())
+    info = ydl.extract_info(url, download=False)
+    wanted = len(info.get("requested_formats") or [info])
+    got = []
+
+    class Got(Exception):
+        pass
+
+    def capture(name, new_info, *a, **k):
+        got.append(new_info)
+        if len(got) >= wanted:
+            raise Got()
+        return True, True
+
+    ydl.dl = capture
+    ydl.params.update(overwrites=True, outtmpl={"default": "/tmp/diagD_%(format_id)s.%(ext)s"})
+    try:
+        ydl.process_ie_result(info, download=True)
+    except Exception:
+        pass
+    print(f"D: captured {len(got)} of {wanted} links: " +
+          " | ".join(f"{f.get('format_id')}: {fetch(ydl, f, True)}" for f in got))
+except Exception as e:
+    print(f"D: FAIL ({str(e)[:150]})")
+
 for f in os.listdir("/tmp"):
     if f.startswith("diag"):
         os.remove(os.path.join("/tmp", f))
