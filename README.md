@@ -67,26 +67,23 @@ There's no prebuilt image, so Unraid builds it from this repo using the
 
 ### 4. Create the stack
 
-1. Go to the **Docker** tab and scroll down to **Compose**. Click **Add New Stack**.
-2. Name it `youtube_live` and click **OK**.
-3. Click the gear icon next to the new stack → **Edit Stack** → **Compose File**.
-   Replace the contents with the following, then click **Save Changes**:
-   ```yaml
-   services:
-     yt-live-tv:
-       build: /mnt/user/appdata/youtube_live
-       image: yt-live-tv:local
-       container_name: yt-live-tv
-       ports:
-         - "5004:5004"
-       volumes:
-         - /mnt/user/appdata/youtube_live/config.yaml:/config/config.yaml:ro
-         # - /mnt/user/appdata/youtube_live/cookies.txt:/config/cookies.txt:ro
-       restart: unless-stopped
-   ```
-   If it asks about WebUI or icon labels, you can skip them.
-4. Click **Compose Up**. The first build takes a few minutes. Wait for "done".
-5. Set **Autostart** to **On** for the stack, so it starts with the array.
+1. Go to the **Docker** tab, scroll down to **Compose**, and click **Add New Stack**.
+2. **Stack Name:** `youtube_live`. **Description:** optional, e.g. `YouTube channels as Plex Live TV`.
+3. Under **Compose Sources & Files**, choose **External folder**. A path box appears;
+   enter `/mnt/user/appdata/youtube_live` (the folder from step 2, which already
+   contains `docker-compose.yml`).
+4. Leave everything else at its default:
+   - **External ENV File Path:** leave empty (no `.env` is needed)
+   - **Compose File Discovery:** leave as is
+   - **Override File Management:** **Automatic**
+5. Click **Create**.
+6. Find `youtube_live` in the Compose list and click **Compose Up** (or the
+   gear/stack menu → **Compose Up**). The first run builds the image, which takes a few
+   minutes. Wait until it finishes.
+7. Turn **Autostart** on for the stack, so it starts with the array.
+
+> Don't use the **Git repository** option. The plugin keeps its own hidden copy of
+> the code, which makes `config.yaml` hard to find and edit.
 
 ### 5. Check it's working
 
@@ -118,8 +115,10 @@ There's no prebuilt image, so Unraid builds it from this repo using the
 ```sh
 cd /mnt/user/appdata/youtube_live && git pull
 ```
-Then on the Docker tab → Compose → gear icon next to `youtube_live` → **Compose Down**,
-then **Update Stack** (this rebuilds the image), then **Compose Up**.
+Then on the Docker tab → Compose → `youtube_live` → **Compose Down**, then
+**Compose Up**. If the stack menu has **Update Stack** or **Rebuild**, use that so the
+image is rebuilt with the new code. Otherwise run this in the terminal:
+`cd /mnt/user/appdata/youtube_live && docker compose up -d --build`.
 
 ### Unraid troubleshooting
 
@@ -129,7 +128,7 @@ then **Update Stack** (this rebuilds the image), then **Compose Up**.
   This works with Plex on either host or bridge networking.
 - **Channels show no videos:** check the logs. "Sign in to confirm you're not a bot"
   means you need a `cookies.txt`. Put it in `/mnt/user/appdata/youtube_live/`,
-  uncomment that volume line in the stack, set `cookies: /config/cookies.txt` in
+  uncomment the `cookies.txt` line in `/mnt/user/appdata/youtube_live/docker-compose.yml`, set `cookies: /config/cookies.txt` in
   `config.yaml`, and run Compose Up again.
 
 ## URLs

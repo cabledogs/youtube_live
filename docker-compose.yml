@@ -1,6 +1,7 @@
 services:
   yt-live-tv:
     build: .
+    image: yt-live-tv:local
     container_name: yt-live-tv
     ports:
       - "5004:5004"
