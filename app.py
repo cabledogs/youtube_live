@@ -23,6 +23,12 @@ from xml.sax.saxutils import escape
 
 import yaml
 
+try:  # use yt-dlp in-process, so links are fetched with the same session that got them
+    import yt_dlp
+    from yt_dlp.networking import Request as YDLRequest
+except ImportError:
+    yt_dlp = None
+
 from local_guide import LocalGuide
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -143,23 +149,48 @@ _url_lock = threading.Lock()
 LAST_ERROR = {"time": None, "video": None, "error": None}
 
 
+_sessions = {}  # stream url -> (YoutubeDL instance that produced it, expires)
+
+
+def _ydl_opts():
+    argv = ["-f", FORMAT, "--quiet", "--no-warnings", *YTDLP_ARGS]
+    if COOKIES:
+        argv += ["--cookies", COOKIES]
+    opts = yt_dlp.parse_options(argv).ydl_opts
+    opts["ignoreerrors"] = False  # raise, so the real reason reaches the log and /status
+    return opts
+
+
+def _resolve_info(video_id):
+    """Ask YouTube for a video's stream info. Returns (info, ydl, error)."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    if yt_dlp:
+        ydl = yt_dlp.YoutubeDL(_ydl_opts())
+        try:
+            return ydl.extract_info(url, download=False), ydl, None
+        except Exception as e:
+            return None, None, str(e)[-500:]
+    r = ytdlp("-f", FORMAT, "-j", *YTDLP_ARGS, url)
+    if r.returncode == 0 and r.stdout.strip():
+        return json.loads(r.stdout.splitlines()[0]), None, None
+    return None, None, r.stderr.strip()[-500:]
+
+
 def resolve(video_id):
     """Get direct media URL(s) for a video, cached until shortly before YouTube expires them."""
     with _url_lock:
         hit = _url_cache.get(video_id)
     if hit and hit[0] > time.time():
         return hit[1]
-    r = ytdlp("-f", FORMAT, "-j", *YTDLP_ARGS, f"https://www.youtube.com/watch?v={video_id}")
+    info, ydl, err = _resolve_info(video_id)
     urls = []
-    if r.returncode == 0 and r.stdout.strip():
-        info = json.loads(r.stdout.splitlines()[0])
-        # Each stream: (url, headers). googlevideo answers 403 unless we send the same
-        # headers (User-Agent etc.) yt-dlp used when it got the link.
-        for f in info.get("requested_formats") or [info]:
-            if f.get("url"):
-                urls.append((f["url"], f.get("http_headers") or info.get("http_headers") or {}))
+    # Each stream: (url, headers). googlevideo answers 403 unless we send the same
+    # headers (User-Agent etc.) yt-dlp used when it got the link.
+    for f in (info.get("requested_formats") or [info]) if info else []:
+        if f.get("url"):
+            urls.append((f["url"], f.get("http_headers") or info.get("http_headers") or {}))
     if not urls:
-        err = r.stderr.strip()[-500:]
+        err = err or "no playable formats"
         log.warning("resolve %s failed: %s", video_id, err)
         LAST_ERROR.update(time=time.strftime("%Y-%m-%d %H:%M:%S"), video=video_id, error=err)
         return []
@@ -167,7 +198,16 @@ def resolve(video_id):
     expires = min(int(m.group(1)) - 900, time.time() + 4 * 3600) if m else time.time() + 3600
     with _url_lock:
         _url_cache[video_id] = (expires, urls)
+        if ydl:
+            for u, _ in urls:
+                _sessions[u] = (ydl, expires)
     return urls
+
+
+def session_for(url):
+    with _url_lock:
+        hit = _sessions.get(url)
+    return hit[0] if hit else None
 
 
 BAD_VIDEOS = {}   # video_id -> skip until (YouTube refuses to stream these to us)
@@ -190,7 +230,7 @@ def link_works(urls):
     for u, headers in urls:
         if u.startswith("http"):
             try:
-                fetch_range({"url": u, "headers": dict(headers)}, 0, 1023).close()
+                fetch_range({"url": u, "headers": dict(headers), "ydl": session_for(u)}, 0, 1023).close()
             except Exception as e:
                 return str(e)
     return None
@@ -239,6 +279,8 @@ def prefetch_loop():
         with _url_lock:
             for vid in [k for k, (exp, _) in _url_cache.items() if exp < now]:
                 del _url_cache[vid]
+            for u in [k for k, (_, exp) in _sessions.items() if exp < now]:
+                del _sessions[u]
         for d in (_checked, BAD_VIDEOS):
             for vid in [k for k, exp in d.items() if exp < now]:
                 del d[vid]
@@ -280,23 +322,30 @@ def relay_url(url, headers):
         now = time.time()
         for t in [t for t, e in _relay.items() if e["expires"] < now]:
             del _relay[t]
-        _relay.setdefault(token, {"url": url, "headers": dict(headers),
+        _relay.setdefault(token, {"url": url, "headers": dict(headers), "ydl": session_for(url),
                                   "size": int(m.group(1)) if m else None,
                                   "expires": now + 6 * 3600})
     return f"http://127.0.0.1:{PORT}/relay/{token}"
+
+
+def _open(entry, url, headers):
+    if ydl := entry.get("ydl"):
+        return ydl.urlopen(YDLRequest(url, headers=headers))  # same session/cookies as extraction
+    return urlopen(Request(url, headers=headers), timeout=30)
 
 
 def fetch_range(entry, start, end):
     """Open a bounded byte range upstream. Falls back to YouTube's ?range= form."""
     url, headers = entry["url"], entry["headers"]
     try:
-        return urlopen(Request(url, headers={**headers, "Range": f"bytes={start}-{end}"}), timeout=30)
-    except HTTPError as e:
-        if e.code not in (403, 416):
+        return _open(entry, url, {**headers, "Range": f"bytes={start}-{end}"})
+    except Exception as e:
+        code = getattr(e, "status", None) or getattr(e, "code", None)
+        if code not in (403, 416):
             raise
-        log.info("relay: Range header refused (%s), trying range= parameter", e.code)
+        log.info("relay: Range header refused (%s), trying range= parameter", code)
     sep = "&" if "?" in url else "?"
-    return urlopen(Request(f"{url}{sep}range={start}-{end}", headers=headers), timeout=30)
+    return _open(entry, f"{url}{sep}range={start}-{end}", headers)
 
 
 def relay_size(entry):
