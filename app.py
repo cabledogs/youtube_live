@@ -170,42 +170,94 @@ def resolve(video_id):
     return urls
 
 
+BAD_VIDEOS = {}   # video_id -> skip until (YouTube refuses to stream these to us)
+_checked = {}     # video_id -> link expiry; links already confirmed to stream
+BAD_HOURS = 6
+
+
+def is_bad(video_id):
+    return BAD_VIDEOS.get(video_id, 0) > time.time()
+
+
+def mark_bad(video_id, why):
+    if not is_bad(video_id):
+        log.warning("skipping video %s for %dh: %s", video_id, BAD_HOURS, why)
+    BAD_VIDEOS[video_id] = time.time() + BAD_HOURS * 3600
+    forget(video_id)
+
+
+def link_works(urls):
+    for u, headers in urls:
+        if u.startswith("http"):
+            try:
+                fetch_range({"url": u, "headers": dict(headers)}, 0, 1023).close()
+            except Exception as e:
+                return str(e)
+    return None
+
+
+def check_playable(video_id):
+    """Resolve and test-download 1 KB of each stream. Marks refused videos as bad."""
+    if is_bad(video_id):
+        return False
+    if _checked.get(video_id, 0) > time.time():
+        return True
+    for attempt in range(2):
+        urls = resolve(video_id)
+        if not urls:
+            mark_bad(video_id, "no stream links")
+            return False
+        err = link_works(urls)
+        if not err:
+            with _url_lock:
+                _checked[video_id] = _url_cache.get(video_id, (time.time() + 3600,))[0]
+            return True
+        forget(video_id)
+    mark_bad(video_id, err)
+    return False
+
+
 def prefetch_loop():
-    """Keep links for what's airing now and next ready, so tuning starts in a second or two
-    instead of waiting on YouTube (Plex gives up with "Could not tune channel" otherwise)."""
+    """Keep tested links ready for what's airing now and next on every channel, so
+    tuning starts within a second instead of Plex giving up ("Could not tune channel")."""
     while True:
         for ch in CHANNELS.values():
             videos = ch.videos
             if not videos:
                 continue
-            i, offset, _ = Channel.locate(videos, time.time())
-            upcoming = [videos[i]]
-            if videos[i]["duration"] - offset < 900:  # less than 15 min left: get the next one too
-                upcoming.append(videos[(i + 1) % len(videos)])
-            for v in upcoming:
+            i, _, _ = Channel.locate(videos, time.time())
+            ready = 0
+            for k in range(min(12, len(videos))):  # stop after 2 good ones
                 try:
-                    resolve(v["id"])
+                    if check_playable(videos[(i + k) % len(videos)]["id"]):
+                        ready += 1
                 except Exception:
                     log.exception("[%s] prefetch failed", ch.name)
+                if ready >= 2:
+                    break
+        now = time.time()
         with _url_lock:
-            now = time.time()
             for vid in [k for k, (exp, _) in _url_cache.items() if exp < now]:
                 del _url_cache[vid]
-        time.sleep(120)
+        for d in (_checked, BAD_VIDEOS):
+            for vid in [k for k, exp in d.items() if exp < now]:
+                del d[vid]
+        # Check again soon while channels are still loading at startup.
+        time.sleep(60 if all(ch.videos for ch in CHANNELS.values()) else 5)
 
 
 def status():
-    out = {"last_youtube_error": LAST_ERROR, "channels": []}
+    out = {"last_youtube_error": LAST_ERROR, "skipped_videos": len(BAD_VIDEOS), "channels": []}
     for ch in CHANNELS.values():
         videos = ch.videos
         entry = {"number": ch.number, "name": ch.name, "videos": len(videos)}
         if videos:
             i, offset, _ = Channel.locate(videos, time.time())
             with _url_lock:
-                ready = videos[i]["id"] in _url_cache
+                ready = videos[i]["id"] in _checked
             entry.update(now_playing=videos[i]["title"], video_id=videos[i]["id"],
                          position=f"{int(offset // 60)}m of {int(videos[i]['duration'] // 60)}m",
-                         link_ready=ready)
+                         link_ready=ready, skipped=is_bad(videos[i]["id"]))
         out["channels"].append(entry)
     return out
 
@@ -329,6 +381,8 @@ def forget(video_id):
 
 def play_video(v, offset, elapsed, out, ch):
     """Stream one video into out. Returns (bytes_sent, completed_normally)."""
+    if is_bad(v["id"]):
+        return 0, False
     urls = resolve(v["id"])
     if not urls:
         return 0, False
@@ -370,16 +424,17 @@ def stream_channel(ch, out):
         v = videos[i]
         started = time.time()
         sent, ok = play_video(v, offset, elapsed, out, ch)
-        if not sent:
+        if not sent and not is_bad(v["id"]):
             # Links can go stale or be refused; get a fresh one and try once more.
             forget(v["id"])
             log.info("[%s] retrying %s with a fresh link", ch.name, v["id"])
             started = time.time()
             sent, ok = play_video(v, offset, elapsed, out, ch)
+            if not sent:
+                mark_bad(v["id"], "refused twice while playing")
         if not sent:
-            forget(v["id"])
             failures += 1
-            if failures >= 5:
+            if failures >= 25:
                 log.error("[%s] too many failures in a row, giving up", ch.name)
                 return
         else:
