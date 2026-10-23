@@ -73,7 +73,9 @@ There's no prebuilt image, so Unraid builds it from this repo using the
    enter `/mnt/user/appdata/youtube_live` (the folder from step 2, which already
    contains `docker-compose.yml`).
 4. Leave everything else at its default:
-   - **External ENV File Path:** leave empty (no `.env` is needed)
+   - **External ENV File Path:** `/mnt/user/appdata/youtube_live/.env`
+     (an empty placeholder in the repo; the app doesn't use it, but the plugin may
+     require it before **Create** works)
    - **Compose File Discovery:** leave as is
    - **Override File Management:** **Automatic**
 5. Click **Create**.
