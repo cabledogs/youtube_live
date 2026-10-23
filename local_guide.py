@@ -45,6 +45,7 @@ class LocalGuide:
         self.merge = cfg.get("merge", True)
         self.prefix = cfg.get("id_prefix", "local.")
         self.grid_url = cfg.get("grid_url", GRID_URL)
+        self.aid = cfg.get("aid", "orbebb")
         self._x = xml_text
         self._t = xmltv_time
         self.channels_xml = []
@@ -55,11 +56,11 @@ class LocalGuide:
             "lineupId": self.lineup_id, "timespan": WINDOW_HOURS, "headendId": "lineupId",
             "country": self.country, "timezone": "", "device": self.device,
             "postalCode": self.postal_code, "isOverride": "true", "time": ts,
-            "pref": "16,128", "userId": "-", "aid": "orbebb", "languagecode": "en-us",
+            "pref": "16,128", "userId": "-", "aid": self.aid, "languagecode": "en-us",
         }
         req = Request(f"{self.grid_url}?{urlencode(params)}",
                       headers={"User-Agent": UA, "Accept": "application/json",
-                               "Referer": "https://tvlistings.gracenote.com/"})
+                               "Referer": f"https://tvlistings.gracenote.com/grid-affiliates.html?aid={self.aid}"})
         with urlopen(req, timeout=30) as r:
             return json.load(r)
 
