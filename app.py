@@ -183,6 +183,14 @@ def stream_channel(ch, out):
         i, offset = (i + 1) % len(videos), 0.0
 
 
+# Characters XML 1.0 forbids; YouTube titles/descriptions occasionally contain them.
+_INVALID_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+
+
+def xml_text(s):
+    return escape(_INVALID_XML.sub("", s), {'"': "&quot;"})
+
+
 def xmltv_time(ts):
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y%m%d%H%M%S +0000")
 
@@ -191,13 +199,14 @@ def build_xmltv():
     now = time.time()
     parts = ['<?xml version="1.0" encoding="UTF-8"?>', '<tv generator-info-name="yt-live-tv">']
     for ch in CHANNELS.values():
-        parts.append(f'<channel id="{ch.number}"><display-name>{escape(ch.name)}</display-name>'
+        parts.append(f'<channel id="{ch.number}"><display-name>{xml_text(ch.name)}</display-name>'
                      f'<display-name>{ch.number}</display-name></channel>')
     for ch in CHANNELS.values():
         for start, stop, v in ch.schedule(now - 3600, now + GUIDE_HOURS * 3600):
             parts.append(
                 f'<programme start="{xmltv_time(start)}" stop="{xmltv_time(stop)}" channel="{ch.number}">'
-                f'<title>{escape(v["title"])}</title><desc>{escape(v["description"])}</desc>'
+                f'<title lang="en">{xml_text(v["title"])}</title>'
+                f'<desc lang="en">{xml_text(v["description"] or v["title"])}</desc>'
                 f'<icon src="https://i.ytimg.com/vi/{v["id"]}/hqdefault.jpg"/></programme>')
     parts.append("</tv>")
     return "\n".join(parts)
@@ -215,7 +224,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -242,7 +252,7 @@ class Handler(BaseHTTPRequestHandler):
 <modelName>HDTC-2US</modelName><modelNumber>HDTC-2US</modelNumber><serialNumber>{DEVICE_ID}</serialNumber>
 <UDN>uuid:{DEVICE_ID}</UDN></device></root>""", "application/xml")
         elif path in ("/xmltv.xml", "/guide.xml"):
-            self.send(build_xmltv(), "application/xml")
+            self.send(build_xmltv(), "text/xml; charset=utf-8")
         elif path in ("/playlist.m3u", "/channels.m3u"):
             lines = ["#EXTM3U"] + [
                 f'#EXTINF:-1 tvg-id="{ch.number}" tvg-chno="{ch.number}",{ch.name}\n{BASE_URL}/stream/{ch.number}'
@@ -258,12 +268,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.close_connection = True
+            if self.command == "HEAD":
+                return
             try:
                 stream_channel(ch, self.wfile)
             except (BrokenPipeError, ConnectionResetError):
                 log.info("[%s] viewer disconnected", ch.name)
         else:
             self.send_error(404)
+
+    do_HEAD = do_GET
 
     def log_message(self, fmt, *args):
         log.debug(fmt, *args)

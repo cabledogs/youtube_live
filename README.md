@@ -128,6 +128,16 @@ image is rebuilt with the new code. Otherwise run this in the terminal:
   and use `:5005` in `base_url` and in Plex.
 - **Plex can't reach the tuner:** use the server's LAN IP, not `localhost`.
   This works with Plex on either host or bridge networking.
+- **Plex won't accept the XMLTV guide:**
+  1. Live TV & DVR requires **Plex Pass**.
+  2. Open `http://YOUR-IP:5004/xmltv.xml` in a browser. It should show `<programme>` entries.
+     If it only shows `<channel>` lines, the channels haven't loaded yet. Wait and check the logs.
+  3. Use the LAN IP, not `localhost`. Plex runs in its own container, so `localhost` points at Plex itself.
+  4. Test from inside the Plex container (Docker tab → Plex icon → Console):
+     `curl -s http://YOUR-IP:5004/xmltv.xml | head`. If that fails, Plex can't reach the
+     port. Check the port mapping and any VLAN or custom network settings.
+  5. In the DVR setup, the XMLTV link is on the guide step, under the country/postal code
+     fields: "Have an XMLTV guide on your server? Click here to use that instead."
 - **Channels show no videos:** check the logs. "Sign in to confirm you're not a bot"
   means you need a `cookies.txt`. Put it in `/mnt/user/appdata/youtube_live/`,
   uncomment the `cookies.txt` line in `/mnt/user/appdata/youtube_live/docker-compose.yml`, set `cookies: /config/cookies.txt` in
