@@ -307,6 +307,58 @@ def serve_relay(handler, token):
         handler.close_connection = True
 
 
+def _ffmpeg_pacing():
+    """Real-time pacing, but with an initial burst when this ffmpeg supports it, so
+    Plex gets a few seconds of buffer right away instead of timing out."""
+    try:
+        h = subprocess.run(["ffmpeg", "-hide_banner", "-h", "full"], capture_output=True, text=True).stdout
+    except OSError:
+        h = ""
+    if "readrate_initial_burst" in h:
+        return ["-readrate", "1", "-readrate_initial_burst", str(CFG.get("initial_burst", 10))]
+    return ["-re"]
+
+
+PACING = _ffmpeg_pacing()
+
+
+def forget(video_id):
+    with _url_lock:
+        _url_cache.pop(video_id, None)
+
+
+def play_video(v, offset, elapsed, out, ch):
+    """Stream one video into out. Returns (bytes_sent, completed_normally)."""
+    urls = resolve(v["id"])
+    if not urls:
+        return 0, False
+    log.info("[%s] playing %s (%s) from %.0fs", ch.name, v["title"], v["id"], offset)
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", *PACING]
+    for u, headers in urls:
+        if u.startswith("http"):
+            u = relay_url(u, headers)
+        cmd += ["-ss", f"{offset:.2f}", "-i", u]
+    if len(urls) > 1:
+        cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+    else:
+        cmd += ["-map", "0:v:0?", "-map", "0:a:0?"]
+    cmd += ["-c", "copy", "-output_ts_offset", f"{elapsed:.3f}",
+            "-muxdelay", "0", "-f", "mpegts", "pipe:1"]
+    started = time.time()
+    sent = 0
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    try:
+        while chunk := p.stdout.read1(65536):
+            if not sent:
+                log.info("[%s] video started after %.1fs", ch.name, time.time() - started)
+            out.write(chunk)
+            sent += len(chunk)
+    finally:
+        p.kill()
+        rc = p.wait()
+    return sent, rc == 0
+
+
 def stream_channel(ch, out):
     videos = ch.videos
     if not videos:
@@ -316,41 +368,24 @@ def stream_channel(ch, out):
     failures = 0
     while True:
         v = videos[i]
-        urls = resolve(v["id"])
-        if not urls:
+        started = time.time()
+        sent, ok = play_video(v, offset, elapsed, out, ch)
+        if not sent:
+            # Links can go stale or be refused; get a fresh one and try once more.
+            forget(v["id"])
+            log.info("[%s] retrying %s with a fresh link", ch.name, v["id"])
+            started = time.time()
+            sent, ok = play_video(v, offset, elapsed, out, ch)
+        if not sent:
+            forget(v["id"])
             failures += 1
             if failures >= 5:
                 log.error("[%s] too many failures in a row, giving up", ch.name)
                 return
-            i, offset = (i + 1) % len(videos), 0.0
-            continue
-        log.info("[%s] playing %s (%s) from %.0fs", ch.name, v["title"], v["id"], offset)
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-re"]
-        for u, headers in urls:
-            if u.startswith("http"):
-                u = relay_url(u, headers)
-            cmd += ["-ss", f"{offset:.2f}", "-i", u]
-        if len(urls) > 1:
-            cmd += ["-map", "0:v:0", "-map", "1:a:0"]
         else:
-            cmd += ["-map", "0:v:0?", "-map", "0:a:0?"]
-        cmd += ["-c", "copy", "-output_ts_offset", f"{elapsed:.3f}",
-                "-muxdelay", "0", "-f", "mpegts", "pipe:1"]
-        started = time.time()
-        sent = 0
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-        try:
-            while chunk := p.stdout.read(188 * 1000):
-                out.write(chunk)
-                sent += len(chunk)
-        finally:
-            p.kill()
-            p.wait()
-        elapsed += time.time() - started
-        failures = 0 if sent else failures + 1
-        if failures >= 5:
-            log.error("[%s] too many failures in a row, giving up", ch.name)
-            return
+            failures = 0
+            # Media time actually played, so timestamps stay continuous even with the burst.
+            elapsed += (v["duration"] - offset) if ok else (time.time() - started)
         i, offset = (i + 1) % len(videos), 0.0
 
 
