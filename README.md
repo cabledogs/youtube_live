@@ -154,7 +154,7 @@ image is rebuilt with the new code. Otherwise run this in the terminal:
 ## Local TV listings (optional)
 
 The container can also build a free guide for your real local channels, by zip code,
-from the public Zap2it/Gracenote listings. Add this to the end of your `config.yaml`
+from the public Gracenote listings (the data behind the former Zap2it site). Add this to the end of your `config.yaml`
 and restart:
 
 ```yaml
@@ -165,10 +165,11 @@ local_guide:
   refresh_hours: 12
   merge: true               # also include it in /xmltv.xml
   # Defaults to over-the-air (antenna) channels. For a cable/satellite lineup,
-  # pick your provider on tvlistings.zap2it.com, copy the lineupId from the
+  # pick your provider on tvlistings.gracenote.com, copy the lineupId from the
   # page URL, and set:
   # lineup_id: USA-OH12345-X
   # device: X
+  # grid_url: https://tvlistings.gracenote.com/api/grid   # only if the feed moves again
 ```
 
 - `http://YOUR-IP:5004/local.xml` shows only the local listings, which you can give
@@ -178,7 +179,7 @@ local_guide:
   will never clash with your YouTube channel numbers.
 - The logs show `[local guide] N channels, N programmes` once it works. If it says
   "no listings returned", check the zip code or lineup ID.
-- This relies on an unofficial listings feed. If Zap2it changes it, this part may stop
+- This relies on an unofficial listings feed. If Gracenote changes it, this part may stop
   working. Your YouTube channels and their guide keep working either way.
 
 ## Limiting video length

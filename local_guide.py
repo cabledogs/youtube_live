@@ -1,7 +1,7 @@
 """Free local TV listings (broadcast or cable) by zip code, as XMLTV fragments.
 
-Pulls from the public Zap2it/Gracenote listings grid (the same source zap2xml
-uses) and caches the result. Optional: enabled by `local_guide:` in config.yaml.
+Pulls from the public Gracenote listings grid (the API behind the former
+Zap2it site, which shut down in 2025) and caches the result. Optional: enabled by `local_guide:` in config.yaml.
 """
 
 import json
@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 log = logging.getLogger("yt-live-tv")
 
-GRID_URL = "https://tvlistings.zap2it.com/api/grid"
+GRID_URL = "https://tvlistings.gracenote.com/api/grid"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 WINDOW_HOURS = 3  # the grid API returns at most a few hours per request
@@ -31,7 +31,7 @@ def _img(url):
         return "https:" + url
     if url.startswith("http"):
         return url
-    return f"https://zap2it.tmsimg.com/assets/{url}.jpg"
+    return f"https://zap2it.tmsimg.com/assets/{url}.jpg"  # Gracenote's image CDN, still on this name
 
 
 class LocalGuide:
@@ -44,6 +44,7 @@ class LocalGuide:
         self.refresh_hours = float(cfg.get("refresh_hours", 12))
         self.merge = cfg.get("merge", True)
         self.prefix = cfg.get("id_prefix", "local.")
+        self.grid_url = cfg.get("grid_url", GRID_URL)
         self._x = xml_text
         self._t = xmltv_time
         self.channels_xml = []
@@ -56,8 +57,9 @@ class LocalGuide:
             "postalCode": self.postal_code, "isOverride": "true", "time": ts,
             "pref": "16,128", "userId": "-", "aid": "orbebb", "languagecode": "en-us",
         }
-        req = Request(f"{GRID_URL}?{urlencode(params)}",
-                      headers={"User-Agent": UA, "Accept": "application/json"})
+        req = Request(f"{self.grid_url}?{urlencode(params)}",
+                      headers={"User-Agent": UA, "Accept": "application/json",
+                               "Referer": "https://tvlistings.gracenote.com/"})
         with urlopen(req, timeout=30) as r:
             return json.load(r)
 
