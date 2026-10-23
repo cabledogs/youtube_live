@@ -34,7 +34,7 @@ with open(CONFIG_PATH) as f:
 
 PORT = int(CFG.get("port", 5004))
 BASE_URL = CFG.get("base_url", f"http://localhost:{PORT}").rstrip("/")
-FORMAT = CFG.get("format", "bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/b[height<=720]")
+FORMAT = CFG.get("format", "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080]")
 REFRESH_HOURS = float(CFG.get("refresh_hours", 6))
 TUNERS = int(CFG.get("tuners", 4))
 COOKIES = CFG.get("cookies")

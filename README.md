@@ -216,8 +216,9 @@ You can also set it on one channel only, which overrides the global value:
 - Changing a channel restarts the video airing at that moment, in the middle, like real TV.
 - Shuffled channels keep a stable order. When new uploads arrive, the schedule
   reshuffles and Plex picks up the new guide on its next guide refresh.
-- Default quality is 720p H.264, which Plex plays without transcoding. For 1080p,
-  set `format: "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080]"`.
+- Default quality is 1080p H.264 (or the highest a video has, if lower), which Plex
+  plays without transcoding. To save bandwidth, use 720p:
+  `format: "bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/b[height<=720]"`.
 - If the logs say YouTube wants you to "sign in to confirm you're not a bot",
   export a `cookies.txt` from your browser, mount it in `docker-compose.yml`
   and set `cookies: /config/cookies.txt`.
