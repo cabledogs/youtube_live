@@ -143,12 +143,43 @@ image is rebuilt with the new code. Otherwise run this in the terminal:
   uncomment the `cookies.txt` line in `/mnt/user/appdata/youtube_live/docker-compose.yml`, set `cookies: /config/cookies.txt` in
   `config.yaml`, and run Compose Up again.
 
+## Local TV listings (optional)
+
+The container can also build a free guide for your real local channels, by zip code,
+from the public Zap2it/Gracenote listings. Add this to the end of your `config.yaml`
+and restart:
+
+```yaml
+local_guide:
+  postal_code: "45202"      # your zip code (this one is Cincinnati)
+  country: USA
+  days: 3                   # how many days ahead to fetch
+  refresh_hours: 12
+  merge: true               # also include it in /xmltv.xml
+  # Defaults to over-the-air (antenna) channels. For a cable/satellite lineup,
+  # pick your provider on tvlistings.zap2it.com, copy the lineupId from the
+  # page URL, and set:
+  # lineup_id: USA-OH12345-X
+  # device: X
+```
+
+- `http://YOUR-IP:5004/local.xml` shows only the local listings, which you can give
+  to Jellyfin, TiviMate and other apps.
+- With `merge: true`, `/xmltv.xml` has both your YouTube channels and the local ones,
+  so a single guide URL covers everything. Local channel IDs start with `local.` and
+  will never clash with your YouTube channel numbers.
+- The logs show `[local guide] N channels, N programmes` once it works. If it says
+  "no listings returned", check the zip code or lineup ID.
+- This relies on an unofficial listings feed. If Zap2it changes it, this part may stop
+  working. Your YouTube channels and their guide keep working either way.
+
 ## URLs
 
 | URL | What it is |
 | --- | --- |
 | `/discover.json`, `/lineup.json` | HDHomeRun emulation for Plex/Jellyfin/Emby |
 | `/xmltv.xml` | Program guide |
+| `/local.xml` | Local TV listings only (if `local_guide` is set) |
 | `/playlist.m3u` | Playlist for VLC, TiviMate and other IPTV apps |
 | `/stream/<number>` | The live stream of one channel |
 

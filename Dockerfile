@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
 COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
 RUN pip install --no-cache-dir "yt-dlp[default]" pyyaml
 WORKDIR /app
-COPY app.py .
+COPY app.py local_guide.py ./
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 EXPOSE 5004

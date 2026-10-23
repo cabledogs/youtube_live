@@ -20,6 +20,8 @@ from xml.sax.saxutils import escape
 
 import yaml
 
+from local_guide import LocalGuide
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("yt-live-tv")
 
@@ -195,9 +197,19 @@ def xmltv_time(ts):
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y%m%d%H%M%S +0000")
 
 
+LOCAL = LocalGuide(CFG["local_guide"], xml_text, xmltv_time) if CFG.get("local_guide") else None
+
+
+def build_local_xmltv():
+    return "\n".join(['<?xml version="1.0" encoding="UTF-8"?>', '<tv generator-info-name="yt-live-tv">',
+                      *LOCAL.channels_xml, *LOCAL.programmes_xml, "</tv>"])
+
+
 def build_xmltv():
     now = time.time()
     parts = ['<?xml version="1.0" encoding="UTF-8"?>', '<tv generator-info-name="yt-live-tv">']
+    if LOCAL and LOCAL.merge:
+        parts += LOCAL.channels_xml  # all <channel> elements must come before <programme>s
     for ch in CHANNELS.values():
         parts.append(f'<channel id="{ch.number}"><display-name>{xml_text(ch.name)}</display-name>'
                      f'<display-name>{ch.number}</display-name></channel>')
@@ -208,6 +220,8 @@ def build_xmltv():
                 f'<title lang="en">{xml_text(v["title"])}</title>'
                 f'<desc lang="en">{xml_text(v["description"] or v["title"])}</desc>'
                 f'<icon src="https://i.ytimg.com/vi/{v["id"]}/hqdefault.jpg"/></programme>')
+    if LOCAL and LOCAL.merge:
+        parts += LOCAL.programmes_xml
     parts.append("</tv>")
     return "\n".join(parts)
 
@@ -253,6 +267,8 @@ class Handler(BaseHTTPRequestHandler):
 <UDN>uuid:{DEVICE_ID}</UDN></device></root>""", "application/xml")
         elif path in ("/xmltv.xml", "/guide.xml"):
             self.send(build_xmltv(), "text/xml; charset=utf-8")
+        elif path == "/local.xml" and LOCAL:
+            self.send(build_local_xmltv(), "text/xml; charset=utf-8")
         elif path in ("/playlist.m3u", "/channels.m3u"):
             lines = ["#EXTM3U"] + [
                 f'#EXTINF:-1 tvg-id="{ch.number}" tvg-chno="{ch.number}",{ch.name}\n{BASE_URL}/stream/{ch.number}'
@@ -285,5 +301,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=refresh_loop, daemon=True).start()
+    if LOCAL:
+        LOCAL.start()
     log.info("listening on :%d (base url %s)", PORT, BASE_URL)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
