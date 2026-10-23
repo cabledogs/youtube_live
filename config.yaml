@@ -1,0 +1,33 @@
+# Address Plex uses to reach this server. Use the LAN IP, not localhost.
+base_url: http://192.168.1.50:5004
+port: 5004
+name: YouTube Live TV
+tuners: 4              # how many streams can play at once
+refresh_hours: 6       # how often to check channels for new uploads
+guide_hours: 48
+# Default is 720p H.264 + AAC, which Plex plays without transcoding.
+format: "bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/b[height<=720]"
+# If YouTube starts asking you to "sign in to confirm you're not a bot",
+# export cookies from your browser and uncomment:
+# cookies: /config/cookies.txt
+
+channels:
+  - number: 101
+    name: Veritasium
+    url: https://www.youtube.com/@veritasium
+    shuffle: true
+    max_videos: 300
+
+  - number: 102
+    name: Tasting History
+    url: https://www.youtube.com/@TastingHistory
+    shuffle: true
+
+  # One TV channel built from several YouTube channels or playlists:
+  - number: 103
+    name: Science Mix
+    urls:
+      - https://www.youtube.com/@smartereveryday
+      - https://www.youtube.com/@MarkRober
+      - https://www.youtube.com/playlist?list=PLxxxxxxxxxxxxxxxx
+    shuffle: true

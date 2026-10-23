@@ -1,0 +1,10 @@
+services:
+  yt-live-tv:
+    build: .
+    container_name: yt-live-tv
+    ports:
+      - "5004:5004"
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      # - ./cookies.txt:/config/cookies.txt:ro
+    restart: unless-stopped
