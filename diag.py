@@ -1,11 +1,11 @@
-"""Diagnose YouTube 403s: compare our requests with what yt-dlp's own downloader sends.
+"""Diagnose YouTube 403s: which way of getting/fetching stream links works here.
 
 Run inside the container:
     docker exec -i yt-live-tv python - VIDEO_ID < diag.py
 """
 
+import os
 import sys
-from urllib.parse import parse_qsl, urlparse
 
 import yt_dlp
 from yt_dlp.networking import Request
@@ -13,64 +13,66 @@ from yt_dlp.networking import Request
 vid = sys.argv[1] if len(sys.argv) > 1 else "QjvpjXdgugA"
 url = f"https://www.youtube.com/watch?v={vid}"
 FORMAT = "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080]"
-opts = yt_dlp.parse_options(["-f", FORMAT, "--quiet", "--no-warnings"]).ydl_opts
-opts["ignoreerrors"] = False
 
 
-def params(u):
-    return dict(parse_qsl(urlparse(u).query))
+def opts(client=None, **extra):
+    argv = ["-f", FORMAT, "--quiet", "--no-warnings"]
+    if client:
+        argv += ["--extractor-args", f"youtube:player_client={client}"]
+    o = yt_dlp.parse_options(argv).ydl_opts
+    o["ignoreerrors"] = False
+    o.update(extra)
+    return o
+
+
+def fetch(ydl, f, accept_identity):
+    h = {**(f.get("http_headers") or {}), "Range": "bytes=0-1023"}
+    if accept_identity:
+        h["Accept-Encoding"] = "identity"
+    try:
+        r = ydl.urlopen(Request(f["url"], headers=h))
+        r.read(1024)
+        r.close()
+        return f"OK {r.status}"
+    except Exception as e:
+        return f"FAIL ({getattr(e, 'status', e)})"
 
 
 print(f"yt-dlp {yt_dlp.version.__version__}, video {vid}\n")
-print("=== 1. How our relay fetches ===")
-ydl = yt_dlp.YoutubeDL(opts)
-info = ydl.extract_info(url, download=False)
-fmts = info.get("requested_formats") or [info]
-orig_params = {}
-for f in fmts:
-    orig_params[f["format_id"]] = params(f["url"])
-    print(f"format {f['format_id']} protocol={f.get('protocol')} "
-          f"downloader_options={f.get('downloader_options')} client={params(f['url']).get('c')}")
-    print(f"  http_headers: {f.get('http_headers')}")
-    print(f"  other keys: {sorted(k for k in f if k not in ('url', 'http_headers', 'fragments'))}")
-    for label, extra in [("Range bytes=0-1023", {"Range": "bytes=0-1023"}), ("no Range", {})]:
-        try:
-            r = ydl.urlopen(Request(f["url"], headers={**(f.get("http_headers") or {}), **extra}))
-            print(f"  {label:20} -> HTTP {r.status}, got {len(r.read(2048))} bytes")
-            r.close()
-        except Exception as e:
-            print(f"  {label:20} -> {e}")
 
-print("\n=== 2. How yt-dlp's own downloader fetches (test mode, first ~10 KB) ===")
-orig_urlopen = yt_dlp.YoutubeDL.urlopen
+print("=== A. Look up links only, then fetch 1 KB ourselves ===")
+for client in [None, "tv", "tv_simply", "web_embedded", "mweb", "android_vr", "web_safari"]:
+    name = client or "default"
+    try:
+        ydl = yt_dlp.YoutubeDL(opts(client))
+        info = ydl.extract_info(url, download=False)
+        fmts = info.get("requested_formats") or [info]
+        res = []
+        for f in fmts:
+            res.append(f"{f['format_id']}: plain={fetch(ydl, f, False)} identity={fetch(ydl, f, True)}")
+        print(f"{name:13} " + " | ".join(res))
+    except Exception as e:
+        print(f"{name:13} lookup failed: {str(e)[:120]}")
 
-
-def spy(self, req):
-    u = req.url if isinstance(req, Request) else str(req)
-    if "googlevideo" in u:
-        p = params(u)
-        base = next((v for v in orig_params.values() if v.get("itag") == p.get("itag")), {})
-        added = {k: v for k, v in p.items() if k not in base}
-        changed = sorted(k for k in p if k in base and base[k] != p[k])
-        method = getattr(req, "method", "GET")
-        headers = dict(req.headers) if isinstance(req, Request) else {}
-        print(f"REQUEST {method} itag={p.get('itag')} added_params={added} changed_params={changed}")
-        print(f"  headers: {headers}")
-        try:
-            r = orig_urlopen(self, req)
-            print(f"  -> HTTP {r.status}")
-            return r
-        except Exception as e:
-            print(f"  -> {e}")
-            raise
-    return orig_urlopen(self, req)
-
-
-yt_dlp.YoutubeDL.urlopen = spy
-dl_opts = {**opts, "test": True, "outtmpl": "/tmp/diag_%(format_id)s.%(ext)s", "quiet": True,
-           "overwrites": True, "keepvideo": True}
+print("\n=== B. Look up links only, then let yt-dlp's downloader use THOSE links ===")
 try:
-    yt_dlp.YoutubeDL(dl_opts).download([url])
-    print("yt-dlp download: OK")
+    ydl = yt_dlp.YoutubeDL(opts())
+    info = ydl.extract_info(url, download=False)
+    ydl.params.update({"test": True, "outtmpl": {"default": "/tmp/diagB_%(format_id)s.%(ext)s"},
+                       "overwrites": True, "keepvideo": True})
+    ydl.process_ie_result(info, download=True)
+    print("B: yt-dlp downloader with looked-up links: OK")
 except Exception as e:
-    print(f"yt-dlp download failed: {e}")
+    print(f"B: yt-dlp downloader with looked-up links: FAIL ({str(e)[:150]})")
+
+print("\n=== C. Full yt-dlp download (looks up links itself) ===")
+try:
+    yt_dlp.YoutubeDL(opts(test=True, outtmpl={"default": "/tmp/diagC_%(format_id)s.%(ext)s"},
+                          overwrites=True, keepvideo=True)).download([url])
+    print("C: full yt-dlp download: OK")
+except Exception as e:
+    print(f"C: full yt-dlp download: FAIL ({str(e)[:150]})")
+
+for f in os.listdir("/tmp"):
+    if f.startswith("diag"):
+        os.remove(os.path.join("/tmp", f))
