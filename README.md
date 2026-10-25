@@ -201,6 +201,17 @@ You can also set it on one channel only, which overrides the global value:
 
 `min_duration` (default 60 seconds) works the same way and keeps out Shorts.
 
+## Only recent videos
+
+To only use videos uploaded in the last 3 years:
+
+```yaml
+max_age_days: 1095     # 365 = 1 year, 0 = no limit
+```
+
+Like `max_duration`, it can be set globally or on one channel. Upload dates come from
+YouTube's "3 years ago" labels, so they're approximate (to within a month or so).
+
 ## URLs
 
 | URL | What it is |

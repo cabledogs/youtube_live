@@ -66,6 +66,18 @@ def normalize_url(url):
     return url
 
 
+def upload_time(entry):
+    """Upload time of a playlist entry as a unix timestamp, or None if unknown."""
+    if entry.get("timestamp"):
+        return float(entry["timestamp"])
+    if d := entry.get("upload_date"):
+        try:
+            return datetime.strptime(d, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            pass
+    return None
+
+
 class Channel:
     def __init__(self, c):
         self.number = str(c["number"])
@@ -76,16 +88,23 @@ class Channel:
         self.min_duration = int(c.get("min_duration", 60))  # skips Shorts that slip through
         # Skip videos longer than this many seconds (e.g. 3600 = under an hour). 0 = no limit.
         self.max_duration = int(c.get("max_duration", CFG.get("max_duration", 0)) or 0)
+        # Skip videos uploaded more than this many days ago (e.g. 1095 = 3 years). 0 = no limit.
+        self.max_age_days = float(c.get("max_age_days", CFG.get("max_age_days", 0)) or 0)
         self.videos = []  # list of dicts: id, title, duration, description
 
     def refresh(self):
         videos = []
         for url in self.urls:
-            r = ytdlp("--flat-playlist", "-J", "--playlist-end", str(self.max_videos), url)
+            # approximate_date turns "3 years ago" in the channel list into a date
+            r = ytdlp("--flat-playlist", "-J", "--playlist-end", str(self.max_videos),
+                      "--extractor-args", "youtubetab:approximate_date", url)
             if r.returncode != 0:
                 log.error("[%s] failed to list %s: %s", self.name, url, r.stderr.strip()[-500:])
                 continue
+            cutoff = time.time() - self.max_age_days * 86400 if self.max_age_days else None
             for e in json.loads(r.stdout).get("entries") or []:
+                if cutoff and (uploaded := upload_time(e)) and uploaded < cutoff:
+                    continue
                 dur = e.get("duration")
                 if not e.get("id") or not dur or dur < self.min_duration:
                     continue
